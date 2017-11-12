@@ -16,7 +16,7 @@ typedef struct
 	float2 *velocity;
 	float *energy;
 
-	////partile life////
+	////particle life////
 	float *remain_time;
 
 	////rand data used for generating particles////
@@ -44,6 +44,7 @@ typedef struct
 
 void init_particles_cuda(simpleParticleSystem &sps);
 void destroy_particles_cuda(simpleParticleSystem &sps);
-void generate_particles(int thread_size);
+void generate_particles(int generate_size);
 void copy_to_device_sps(simpleParticleSystem &sps);
 void render_particles(uchar4* devPtr, int img_width, int img_height);
+void updata_particles(int generate_size, float passed_time);

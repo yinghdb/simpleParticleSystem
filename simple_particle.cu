@@ -20,9 +20,9 @@ __device__ uchar4 get_color_from_energy(float energy);
 
 __device__ float2 get_acceleration(int index);
 
-__device__ void update_particle_velocity(int index, float2 acc);
+__device__ void update_particle_velocity(int index, float2 acc, float passed_time);
 
-__device__ int update_particle_possition(int index); //return whether the particle is dead
+__device__ int update_particle_position(int index, float passed_time); //return whether the particle is dead
 
 void init_particles_cuda(simpleParticleSystem &sps) {
 	int max_num_particles = sps.MAX_PARTICLE_SIZE;
@@ -60,12 +60,16 @@ void copy_to_device_sps(simpleParticleSystem &sps) {
 		printf("Constant Memory Copy Error: %s\n", cudaGetErrorString(err));
 }
 
-void generate_particles(int thread_size) {
-	generateParticles << < 1, thread_size >> > ();
+void generate_particles(int generate_size) {
+	generateParticles << < 1, generate_size >> > ();
 	//generateParticlesLine <<< 1, sps.ONE_BATCH_PARTICLE_SIZE >>> (
 	//	sps.position, sps.velocity_orientation, sps.velocity, sps.remain_time, sps.rand_data, sps.ONE_BATCH_PARTICLE_SIZE,
 	//	sps.MAX_PARTICLE_SIZE, sps.generator_line[0], sps.generator_line[1], sps.MAX_VELOCITY, sps.MIN_VELOCITY, sps.LIFE_TIME
 	//);
+}
+
+void updata_particles(int generate_size, float passed_time) {
+	updateParticles << < 1, generate_size >> > (passed_time);
 }
 
 void render_particles(uchar4* devPtr, int img_width, int img_height) {
@@ -163,31 +167,31 @@ __global__ void renderParticles(uchar4* devPtr, int img_width, int img_height) {
 		return;
 
 	
-	if (!(x >= (*d_sps).BOUND_BOX[0] && x <= (*d_sps).BOUND_BOX[2]
-		&& y <= (*d_sps).BOUND_BOX[1] && y >= (*d_sps).BOUND_BOX[3]))
+	if (!(x >= (*d_sps).LIFE_BOUND[0] && x <= (*d_sps).LIFE_BOUND[2]
+		&& y <= (*d_sps).LIFE_BOUND[1] && y >= (*d_sps).LIFE_BOUND[3]))
 		return;
 
 	int generate_size = (*d_sps).ONE_BATCH_PARTICLE_SIZE;
 	int max_size = (*d_sps).MAX_PARTICLE_SIZE;
 	float energy = 0;
 	float dist_bound_powerd = (*d_sps).ENERGY_SCOPE * (*d_sps).ENERGY_SCOPE;
-	float2 pos = make_float2(x, y);
+	float2 pos = make_float2(x, y); 
 	for (int start_index = 0; start_index < max_size - generate_size; start_index += generate_size)
 	{
-		if ((*d_sps).remain_time[start_index] == 0)
-			continue;
-		//here we do not render the first particle of the batch
-		for (int index = start_index + 1; index < start_index + generate_size; ++index) {
-			if ((*d_sps).remain_time[index] != 0) {
-				energy += get_energy((*d_sps).position[index], pos, dist_bound_powerd);
-				if (energy >= 1) {
-					energy = 1;
-					break;
+		if ((*d_sps).remain_time[start_index] != 0) {
+			//here we do not render the first particle of the batch
+			for (int index = start_index + 1; index < start_index + generate_size; ++index) {
+				if ((*d_sps).remain_time[index] != 0) {
+					energy += get_energy((*d_sps).position[index], pos, dist_bound_powerd);
+					if (energy >= 1) {
+						energy = 1;
+						break;
+					}
 				}
 			}
-		}
-		if (energy >= 1) {
-			break;
+			if (energy >= 1) {
+				break;
+			}
 		}
 	}
 
@@ -206,12 +210,27 @@ __global__ void updateParticles(float passed_time) {
 
 	while (index < (*d_sps).MAX_PARTICLE_SIZE) {
 		living_particle_num = 0;
-		__syncthreads();
+		//__syncthreads();
 
-		if ((*d_sps).remain_time[start_index] == 0)
-			continue;
-		
-		float2 acc = get_acceleration(index);
+		if ((*d_sps).remain_time[start_index] != 0) {
+			if (index != start_index) {
+				float2 acc = get_acceleration(index);
+				update_particle_velocity(index, acc, passed_time);
+				int is_living = update_particle_position(index, passed_time);
+				if (is_living) {
+					living_particle_num += 1;
+				}
+			}
+
+			__syncthreads();
+
+			if (index == start_index) {
+				if(living_particle_num == 0)
+					(*d_sps).remain_time[index] = 0;
+				else
+					(*d_sps).remain_time[index] = 1.0;
+			}
+		}
 
 		index += strip;
 		start_index += strip;
@@ -234,12 +253,15 @@ __device__ float get_energy(float2 p1, float2 p2, float dist_bound_powerd) {
 	if (dist_powered > dist_bound_powerd)
 		return 0;
 	if (dist_powered == 0)
-		return 0.5;
-	return 0.5 / dist_powered;
+		return 0.1;
+	return 0.1 * sqrtf(dist_bound_powerd - dist_powered)/sqrtf(dist_bound_powerd);
 }
 
 __device__ uchar4 get_color_from_energy(float energy) {
-	unsigned char r = 255 * energy;
+	if (energy == 0)
+		return make_uchar4(0, 0, 0, 0);
+
+	unsigned char r = 90 * energy + 160;
 	unsigned char g = 180 * energy;
 	unsigned char b = 60 * energy;
 	unsigned char w = 255 * energy;
@@ -248,7 +270,7 @@ __device__ uchar4 get_color_from_energy(float energy) {
 }
 
 __device__ float2 get_acceleration(int index) {
-	return make_float2(20.0, 0);
+	return make_float2(0.0, 40.0);
 }
 
 __device__ void update_particle_velocity(int index, float2 acc, float passed_time) {
@@ -257,7 +279,8 @@ __device__ void update_particle_velocity(int index, float2 acc, float passed_tim
 }
 
 __device__ int update_particle_position(int index, float passed_time) {
-	if ((*d_sps).remain_time[index] - passed_time <= 0) {
+	(*d_sps).remain_time[index] -= passed_time;
+	if ((*d_sps).remain_time[index] <= 0) {
 		(*d_sps).remain_time[index] = 0;
 		return 0;
 	}
@@ -265,9 +288,21 @@ __device__ int update_particle_position(int index, float passed_time) {
 	float2 *pos = &(*d_sps).position[index];
 	(*pos).x += (*d_sps).velocity[index].x * passed_time;
 	(*pos).y += (*d_sps).velocity[index].y * passed_time;
+	float x = (*pos).x;
+	float y = (*pos).y;
 
-	if ((*pos).x > (*d_sps).LIFE_BOUND[0] && (*pos).x < (*d_sps).LIFE_BOUND[2]
-		&& (*pos).y < (*d_sps).LIFE_BOUND[1] && (*pos).y < (*d_sps).LIFE_BOUND[3]) {
+	if (x > (*d_sps).LIFE_BOUND[0] && x < (*d_sps).LIFE_BOUND[2]
+		&& y < (*d_sps).LIFE_BOUND[1] && y > (*d_sps).LIFE_BOUND[3]) {
+
+		//if (x < (*d_sps).BOUND_BOX[0] + (*d_sps).ENERGY_SCOPE)
+		//	(*d_sps).BOUND_BOX[0] = x - (*d_sps).ENERGY_SCOPE;
+		//else if (x >(*d_sps).BOUND_BOX[2] - (*d_sps).ENERGY_SCOPE)
+		//	(*d_sps).BOUND_BOX[2] = x + (*d_sps).ENERGY_SCOPE;
+		//if (y < (*d_sps).BOUND_BOX[3] + (*d_sps).ENERGY_SCOPE)
+		//	(*d_sps).BOUND_BOX[3] = y - (*d_sps).ENERGY_SCOPE;
+		//else if (y >(*d_sps).BOUND_BOX[1] - (*d_sps).ENERGY_SCOPE)
+		//	(*d_sps).BOUND_BOX[1] = y + (*d_sps).ENERGY_SCOPE;
+
 		return 1;
 	}
 
